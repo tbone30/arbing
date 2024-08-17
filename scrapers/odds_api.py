@@ -4,6 +4,7 @@ from datetime import datetime
 import os
 from dotenv import load_dotenv
 
+# Load environment variables from .env file
 load_dotenv()
 
 BASE_URL = "https://api.the-odds-api.com/v4/sports"
@@ -17,7 +18,7 @@ SPORTS = [
 ]
 
 params = {
-    "api_key": API_KEY,
+    "api_key": os.getenv("API_KEY"),  # Get API key from environment variable
     "regions": "us,uk",
     "markets": "h2h",
     "oddsFormat": "decimal",
