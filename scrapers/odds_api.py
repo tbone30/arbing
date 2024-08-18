@@ -10,9 +10,15 @@ load_dotenv()
 BASE_URL = "https://api.the-odds-api.com/v4/sports"
 
 SPORTS = [
-    "americanfootball_nfl",
-    "baseball_mlb",
-    "soccer_epl",
+    # 'soccer_france_ligue_one',
+    # 'soccer_mexico_ligamx',
+    # "boxing_boxing",
+    # "americanfootball_nfl",
+    # 'americanfootball_nfl_preseason',
+    # 'basketball_wnba',
+    # 'baseball_kbo',
+    # "baseball_mlb",
+    # "soccer_epl",
     # "soccer_la_liga",
     # "basketball_nba",
     # "soccer_mls",

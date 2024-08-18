@@ -8,8 +8,8 @@ import pytz
 MINIMUM_ARBITRAGE_PROFIT = 0  # Minimum profit in dollars for arbitrage opportunities
 MAX_DAYS_AHEAD = 28  # Maximum number of days ahead for considering events
 MAX_OPPORTUNITIES_PER_GAME = 3  # Maximum number of opportunities to show per game
-ALLOWED_BOOKMAKERS = {'betus', 'fanduel', 'draftkings', 'pointsbetus', 'wynnbet', 'bovada', 'betmgm'}  # Set of allowed bookmakers
-MIN_EV_THRESHOLD = 0.01  # Minimum EV to consider a bet (1%)
+ALLOWED_BOOKMAKERS = {'betus', 'fanduel', 'draftkings', 'pointsbetus', 'wynnbet', 'bovada', 'betmgm', 'espnbet', 'fliff', 'betonlineag', 'betrivers', 'hardrockbet'}  # Set of allowed bookmakers
+MIN_EV_THRESHOLD = 0.00  # Minimum EV to consider a bet (1%)
 MAX_EV_THRESHOLD = 0.15  # Maximum EV to consider realistic (15%)
 
 # Time zone configuration
@@ -85,7 +85,7 @@ def find_arbitrage_opportunities(bets, sport):
                             best_bets[outcome] = bet
                     
                     # Check if we have odds for all possible outcomes
-                    if sport.lower() == 'soccer_epl' and market == 'moneyline' and len(best_bets) == 3:
+                    if sport.lower()[:6] == 'soccer' and market == 'moneyline' and len(best_bets) == 3:
                         total_prob = sum(1 / bet['Odds'] for bet in best_bets.values())
                         if total_prob < 1:
                             stakes = {team: (1 / bet['Odds']) / total_prob for team, bet in best_bets.items()}
@@ -167,7 +167,7 @@ def analyze_odds(filename):
                 })
                 
                 # Add draw bet if available (for soccer)
-                if sport.lower() == 'soccer_epl' and 'Draw Odds' in row and row['Draw Odds'] != 'N/A':
+                if sport.lower()[:6] == 'soccer' and 'Draw Odds' in row and row['Draw Odds'] != 'N/A':
                     draw_odds = float(row['Draw Odds'])
                     games[sport][game_key]['moneyline'].append({
                         'Team': 'Draw',
@@ -263,13 +263,30 @@ def analyze_odds(filename):
                                 'Start Time': best_odds['Start Time']
                             })
                     else:
-                        if sport.lower() == 'soccer_epl' and market == 'moneyline':
+                        if sport.lower()[:6] == 'soccer' and market == 'moneyline':
                             # For soccer moneyline, only consider if all three outcomes are present
                             outcomes = set(bet['Team'] for bet in data[market])
                             if len(outcomes) == 3 and 'Draw' in outcomes:
-                                total_implied_prob = sum(bet['Implied Probability'] for bet in data[market])
+                                # Group bets by outcome
+                                bets_by_outcome = {outcome: [] for outcome in outcomes}
                                 for bet in data[market]:
-                                    true_prob = bet['Implied Probability'] / total_implied_prob
+                                    bets_by_outcome[bet['Team']].append(bet)
+                                
+                                # Calculate average true probability for each outcome
+                                avg_true_probs = {}
+                                for outcome, bets in bets_by_outcome.items():
+                                    implied_probs = [1 / bet['Odds'] for bet in bets]
+                                    avg_implied_prob = sum(implied_probs) / len(implied_probs)
+                                    avg_true_probs[outcome] = avg_implied_prob
+                                
+                                # Normalize probabilities
+                                total_prob = sum(avg_true_probs.values())
+                                for outcome in avg_true_probs:
+                                    avg_true_probs[outcome] /= total_prob
+                                
+                                # Now evaluate each bet using the average true probabilities
+                                for bet in data[market]:
+                                    true_prob = avg_true_probs[bet['Team']]
                                     ev = calculate_ev(bet['Odds'], true_prob)
                                     
                                     if MIN_EV_THRESHOLD <= ev <= MAX_EV_THRESHOLD:
@@ -285,11 +302,29 @@ def analyze_odds(filename):
                                         })
                         else:
                             # For non-soccer sports or other markets
-                            total_implied_prob = sum(bet['Implied Probability'] for bet in data[market])
+                            # Group bets by outcome
+                            outcomes = set(bet['Team'] for bet in data[market])
+                            bets_by_outcome = {outcome: [] for outcome in outcomes}
                             for bet in data[market]:
-                                true_prob = bet['Implied Probability'] / total_implied_prob
+                                bets_by_outcome[bet['Team']].append(bet)
+                            
+                            # Calculate average true probability for each outcome
+                            avg_true_probs = {}
+                            for outcome, bets in bets_by_outcome.items():
+                                implied_probs = [1 / bet['Odds'] for bet in bets]
+                                avg_implied_prob = sum(implied_probs) / len(implied_probs)
+                                avg_true_probs[outcome] = avg_implied_prob
+                            
+                            # Normalize probabilities
+                            total_prob = sum(avg_true_probs.values())
+                            for outcome in avg_true_probs:
+                                avg_true_probs[outcome] /= total_prob
+                            
+                            # Now evaluate each bet using the average true probabilities
+                            for bet in data[market]:
+                                true_prob = avg_true_probs[bet['Team']]
                                 ev = calculate_ev(bet['Odds'], true_prob)
-                                
+                                print(bet['Team'], ev)
                                 if MIN_EV_THRESHOLD <= ev <= MAX_EV_THRESHOLD:
                                     bet_info = {
                                         'Sport': sport,
