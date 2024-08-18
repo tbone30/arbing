@@ -2,14 +2,13 @@ import csv
 import os
 from datetime import datetime, timedelta
 from collections import defaultdict
-from itertools import combinations
 import pytz
 
 # Configuration
-MINIMUM_ARBITRAGE_PROFIT = 10  # Minimum profit in dollars for arbitrage opportunities
-MAX_DAYS_AHEAD = 7  # Maximum number of days ahead for considering events
+MINIMUM_ARBITRAGE_PROFIT = 0  # Minimum profit in dollars for arbitrage opportunities
+MAX_DAYS_AHEAD = 28  # Maximum number of days ahead for considering events
 MAX_OPPORTUNITIES_PER_GAME = 3  # Maximum number of opportunities to show per game
-ALLOWED_BOOKMAKERS = {'betus', 'bet365', 'fanduel', 'draftkings'}  # Set of allowed bookmakers
+ALLOWED_BOOKMAKERS = {'betus', 'fanduel', 'draftkings', 'pointsbetus', 'wynnbet', 'bovada', 'betmgm'}  # Set of allowed bookmakers
 MIN_EV_THRESHOLD = 0.01  # Minimum EV to consider a bet (1%)
 MAX_EV_THRESHOLD = 0.15  # Maximum EV to consider realistic (15%)
 
@@ -22,24 +21,13 @@ def decimal_to_american(decimal_odds):
     else:
         return f"-{int(100 / (decimal_odds - 1))}"
 
-def american_to_decimal(american_odds):
-    if american_odds > 0:
-        return 1 + (american_odds / 100)
-    else:
-        return 1 + (100 / abs(american_odds))
-
 def calculate_implied_probability(odds):
     return 1 / float(odds)
 
 def calculate_ev(odds, true_probability):
     return (true_probability * (odds - 1)) - (1 - true_probability)
 
-def calculate_hedge_bet(stake, odds1, odds2):
-    total_stake = stake * (odds1 / odds2)
-    return total_stake - stake
-
 def parse_and_convert_to_est(date_string):
-    # Assume input is in UTC
     utc_time = datetime.strptime(date_string, "%Y-%m-%dT%H:%M:%SZ")
     utc_time = pytz.utc.localize(utc_time)
     est_time = utc_time.astimezone(EST)
@@ -53,12 +41,71 @@ def is_within_time_range(event_time):
     est_event_time = parse_and_convert_to_est(event_time)
     return now <= est_event_time <= (now + timedelta(days=MAX_DAYS_AHEAD))
 
+def find_arbitrage_opportunities(bets, sport):
+    opportunities = []
+    for market in ['moneyline', 'spread', 'total']:
+        if market in bets:
+            # Group bets by date
+            bets_by_date = defaultdict(list)
+            for bet in bets[market]:
+                bet_date = datetime.strptime(bet['Start Time'], "%m/%d/%Y %I:%M %p EST").date()
+                bets_by_date[bet_date].append(bet)
+            
+            # Check for arbitrage opportunities within each date
+            for date, date_bets in bets_by_date.items():
+                if market == 'total':
+                    best_over = max(date_bets, key=lambda x: x['Over Odds'])
+                    best_under = max(date_bets, key=lambda x: x['Under Odds'])
+                    total_prob = (1 / best_over['Over Odds']) + (1 / best_under['Under Odds'])
+                    if total_prob < 1:
+                        profit = (1 / total_prob - 1) * 100  # Profit percentage
+                        if profit >= MINIMUM_ARBITRAGE_PROFIT:
+                            opportunities.append({
+                                'Market': 'Total',
+                                'Date': date.strftime("%m/%d/%Y"),
+                                'Bets': [
+                                    {'Type': 'Over', 'Odds': best_over['Over Odds'], 'Bookmaker': best_over['Bookmaker'], 'Total': best_over['Total']},
+                                    {'Type': 'Under', 'Odds': best_under['Under Odds'], 'Bookmaker': best_under['Bookmaker'], 'Total': best_under['Total']}
+                                ],
+                                'Profit': profit
+                            })
+                else:
+                    best_bets = {}
+                    for bet in date_bets:
+                        outcome = bet['Team']
+                        if outcome not in best_bets or bet['Odds'] > best_bets[outcome]['Odds']:
+                            best_bets[outcome] = bet
+                    
+                    # Check if we have odds for all possible outcomes
+                    if sport.lower() == 'soccer_epl' and market == 'moneyline':
+                        if len(best_bets) == 3:  # Home, Away, and Draw
+                            total_prob = sum(1 / bet['Odds'] for bet in best_bets.values())
+                            if total_prob < 1:
+                                profit = (1 / total_prob - 1) * 100  # Profit percentage
+                                if profit >= MINIMUM_ARBITRAGE_PROFIT:
+                                    opportunities.append({
+                                        'Market': market.capitalize(),
+                                        'Date': date.strftime("%m/%d/%Y"),
+                                        'Bets': [{'Type': bet['Team'], 'Odds': bet['Odds'], 'Bookmaker': bet['Bookmaker']} for bet in best_bets.values()],
+                                        'Profit': profit
+                                    })
+                    elif len(best_bets) == 2:  # For non-soccer sports or other markets
+                        total_prob = sum(1 / bet['Odds'] for bet in best_bets.values())
+                        if total_prob < 1:
+                            profit = (1 / total_prob - 1) * 100  # Profit percentage
+                            if profit >= MINIMUM_ARBITRAGE_PROFIT:
+                                opportunities.append({
+                                    'Market': market.capitalize(),
+                                    'Date': date.strftime("%m/%d/%Y"),
+                                    'Bets': [{'Type': bet['Team'], 'Odds': bet['Odds'], 'Bookmaker': bet['Bookmaker']} for bet in best_bets.values()],
+                                    'Profit': profit
+                                })
+    return opportunities
+
 def analyze_odds(filename):
     games = defaultdict(lambda: defaultdict(lambda: defaultdict(list)))
     positive_ev_bets = []
     arbitrage_opportunities = []
-    hedging_opportunities = []
-    game_opportunity_count = defaultdict(int)
 
     with open(filename, mode='r', encoding='utf-8') as file:
         csv_reader = csv.DictReader(file)
@@ -66,9 +113,6 @@ def analyze_odds(filename):
         for row in csv_reader:
             sport = row['Sport']
             game_key = f"{row['Home Team']} vs {row['Away Team']}"
-            home_odds = float(row['Home Odds'])
-            away_odds = float(row['Away Odds'])
-            draw_odds = float(row['Draw Odds']) if 'Draw Odds' in row else None
             start_time = row['Start Time']
             bookmaker = row['Bookmaker'].lower()
             
@@ -77,96 +121,207 @@ def analyze_odds(filename):
             
             est_start_time = format_est_time(parse_and_convert_to_est(start_time))
             
-            games[sport][game_key]['home'].append({
-                'Team': row['Home Team'],
-                'Opponent': row['Away Team'],
-                'Bookmaker': bookmaker,
-                'Odds': home_odds,
-                'Implied Probability': calculate_implied_probability(home_odds),
-                'Start Time': est_start_time
-            })
-            
-            games[sport][game_key]['away'].append({
-                'Team': row['Away Team'],
-                'Opponent': row['Home Team'],
-                'Bookmaker': bookmaker,
-                'Odds': away_odds,
-                'Implied Probability': calculate_implied_probability(away_odds),
-                'Start Time': est_start_time
-            })
-            
-            if draw_odds:
-                games[sport][game_key]['draw'].append({
-                    'Team': 'Draw',
+            # Process moneyline (h2h) bets
+            if row['Home Odds'] != 'N/A' and row['Away Odds'] != 'N/A':
+                home_odds = float(row['Home Odds'])
+                away_odds = float(row['Away Odds'])
+                
+                games[sport][game_key]['moneyline'].append({
+                    'Team': row['Home Team'],
+                    'Opponent': row['Away Team'],
                     'Bookmaker': bookmaker,
-                    'Odds': draw_odds,
-                    'Implied Probability': calculate_implied_probability(draw_odds),
-                    'Start Time': est_start_time
+                    'Odds': home_odds,
+                    'Implied Probability': calculate_implied_probability(home_odds),
+                    'Start Time': est_start_time,
+                    'Bet Type': 'Moneyline'
+                })
+                
+                games[sport][game_key]['moneyline'].append({
+                    'Team': row['Away Team'],
+                    'Opponent': row['Home Team'],
+                    'Bookmaker': bookmaker,
+                    'Odds': away_odds,
+                    'Implied Probability': calculate_implied_probability(away_odds),
+                    'Start Time': est_start_time,
+                    'Bet Type': 'Moneyline'
+                })
+                
+                # Add draw bet if available (for soccer)
+                if sport.lower() == 'soccer_epl' and 'Draw Odds' in row and row['Draw Odds'] != 'N/A':
+                    draw_odds = float(row['Draw Odds'])
+                    games[sport][game_key]['moneyline'].append({
+                        'Team': 'Draw',
+                        'Bookmaker': bookmaker,
+                        'Odds': draw_odds,
+                        'Implied Probability': calculate_implied_probability(draw_odds),
+                        'Start Time': est_start_time,
+                        'Bet Type': 'Moneyline'
+                    })
+            
+            # Process spread bets
+            if row['Home Spread'] != 'N/A' and row['Home Spread Odds'] != 'N/A':
+                home_spread = float(row['Home Spread'])
+                home_spread_odds = float(row['Home Spread Odds'])
+                away_spread = -home_spread
+                away_spread_odds = float(row['Away Spread Odds'])
+                
+                games[sport][game_key]['spread'].append({
+                    'Team': row['Home Team'],
+                    'Opponent': row['Away Team'],
+                    'Bookmaker': bookmaker,
+                    'Spread': home_spread,
+                    'Odds': home_spread_odds,
+                    'Implied Probability': calculate_implied_probability(home_spread_odds),
+                    'Start Time': est_start_time,
+                    'Bet Type': 'Spread'
+                })
+                
+                games[sport][game_key]['spread'].append({
+                    'Team': row['Away Team'],
+                    'Opponent': row['Home Team'],
+                    'Bookmaker': bookmaker,
+                    'Spread': away_spread,
+                    'Odds': away_spread_odds,
+                    'Implied Probability': calculate_implied_probability(away_spread_odds),
+                    'Start Time': est_start_time,
+                    'Bet Type': 'Spread'
+                })
+            
+            # Process total (over/under) bets
+            if row['Over'] != 'N/A' and row['Over Odds'] != 'N/A' and row['Under Odds'] != 'N/A':
+                total = float(row['Over'])
+                over_odds = float(row['Over Odds'])
+                under_odds = float(row['Under Odds'])
+                
+                games[sport][game_key]['total'].append({
+                    'Total': total,
+                    'Bookmaker': bookmaker,
+                    'Over Odds': over_odds,
+                    'Under Odds': under_odds,
+                    'Over Implied Probability': calculate_implied_probability(over_odds),
+                    'Under Implied Probability': calculate_implied_probability(under_odds),
+                    'Start Time': est_start_time,
+                    'Bet Type': 'Total'
                 })
 
     for sport, sport_games in games.items():
         for game, data in sport_games.items():
-            outcomes = ['home', 'away', 'draw'] if 'draw' in data else ['home', 'away']
-            best_odds = {outcome: max(data[outcome], key=lambda x: x['Odds']) for outcome in outcomes}
+            arbitrage_opportunities.extend(find_arbitrage_opportunities(data, sport))
             
-            total_implied_prob = sum(bet['Implied Probability'] for bet in best_odds.values())
-            true_probs = {outcome: bet['Implied Probability'] / total_implied_prob for outcome, bet in best_odds.items()}
-            
-            for outcome in outcomes:
-                for bet in data[outcome]:
-                    bet['Sport'] = sport
-                    bet['Game'] = game
-                    bet['Estimated True Probability'] = true_probs[outcome]
-                    bet['EV'] = calculate_ev(bet['Odds'], true_probs[outcome])
-                    if MIN_EV_THRESHOLD <= bet['EV'] <= MAX_EV_THRESHOLD and game_opportunity_count[game] < MAX_OPPORTUNITIES_PER_GAME:
-                        positive_ev_bets.append(bet)
-                        game_opportunity_count[game] += 1
+            for market in ['moneyline', 'spread', 'total']:
+                if market in data:
+                    if market == 'total':
+                        best_odds = max(data[market], key=lambda x: max(x['Over Odds'], x['Under Odds']))
+                        total_implied_prob = best_odds['Over Implied Probability'] + best_odds['Under Implied Probability']
+                        true_prob_over = best_odds['Over Implied Probability'] / total_implied_prob
+                        true_prob_under = best_odds['Under Implied Probability'] / total_implied_prob
+                        
+                        ev_over = calculate_ev(best_odds['Over Odds'], true_prob_over)
+                        ev_under = calculate_ev(best_odds['Under Odds'], true_prob_under)
+                        
+                        if MIN_EV_THRESHOLD <= ev_over <= MAX_EV_THRESHOLD:
+                            positive_ev_bets.append({
+                                'Sport': sport,
+                                'Game': game,
+                                'Bookmaker': best_odds['Bookmaker'],
+                                'Bet Type': 'Total Over',
+                                'Total': best_odds['Total'],
+                                'Odds': best_odds['Over Odds'],
+                                'EV': ev_over,
+                                'Start Time': best_odds['Start Time']
+                            })
+                        
+                        if MIN_EV_THRESHOLD <= ev_under <= MAX_EV_THRESHOLD:
+                            positive_ev_bets.append({
+                                'Sport': sport,
+                                'Game': game,
+                                'Bookmaker': best_odds['Bookmaker'],
+                                'Bet Type': 'Total Under',
+                                'Total': best_odds['Total'],
+                                'Odds': best_odds['Under Odds'],
+                                'EV': ev_under,
+                                'Start Time': best_odds['Start Time']
+                            })
+                    else:
+                        if sport.lower() == 'soccer_epl' and market == 'moneyline':
+                            # For soccer moneyline, only consider if all three outcomes are present
+                            outcomes = set(bet['Team'] for bet in data[market])
+                            if len(outcomes) == 3 and 'Draw' in outcomes:
+                                total_implied_prob = sum(bet['Implied Probability'] for bet in data[market])
+                                for bet in data[market]:
+                                    true_prob = bet['Implied Probability'] / total_implied_prob
+                                    ev = calculate_ev(bet['Odds'], true_prob)
+                                    
+                                    if MIN_EV_THRESHOLD <= ev <= MAX_EV_THRESHOLD:
+                                        positive_ev_bets.append({
+                                            'Sport': sport,
+                                            'Game': game,
+                                            'Team': bet['Team'],
+                                            'Bookmaker': bet['Bookmaker'],
+                                            'Bet Type': bet['Bet Type'],
+                                            'Odds': bet['Odds'],
+                                            'EV': ev,
+                                            'Start Time': bet['Start Time']
+                                        })
+                        else:
+                            # For non-soccer sports or other markets
+                            total_implied_prob = sum(bet['Implied Probability'] for bet in data[market])
+                            for bet in data[market]:
+                                true_prob = bet['Implied Probability'] / total_implied_prob
+                                ev = calculate_ev(bet['Odds'], true_prob)
+                                
+                                if MIN_EV_THRESHOLD <= ev <= MAX_EV_THRESHOLD:
+                                    bet_info = {
+                                        'Sport': sport,
+                                        'Game': game,
+                                        'Team': bet['Team'],
+                                        'Bookmaker': bet['Bookmaker'],
+                                        'Bet Type': bet['Bet Type'],
+                                        'Odds': bet['Odds'],
+                                        'EV': ev,
+                                        'Start Time': bet['Start Time']
+                                    }
+                                    if market == 'spread':
+                                        bet_info['Spread'] = bet['Spread']
+                                    positive_ev_bets.append(bet_info)
 
-            # Check for arbitrage opportunities
-            for combo in combinations(outcomes, len(outcomes)):
-                arb_bets = [max(data[outcome], key=lambda x: x['Odds']) for outcome in combo]
-                total_arb_prob = sum(1 / bet['Odds'] for bet in arb_bets)
-                if total_arb_prob < 1 and game_opportunity_count[game] < MAX_OPPORTUNITIES_PER_GAME:
-                    stakes = [100 / bet['Odds'] / total_arb_prob for bet in arb_bets]
-                    total_stake = sum(stakes)
-                    profit = 100 / total_arb_prob - total_stake
-                    
-                    if profit >= MINIMUM_ARBITRAGE_PROFIT:
-                        opportunity = {
-                            'Sport': sport,
-                            'Game': game,
-                            'Bets': list(zip(arb_bets, stakes)),
-                            'Profit': profit,
-                            'Start Time': arb_bets[0]['Start Time']
-                        }
-                        arbitrage_opportunities.append(opportunity)
-                        game_opportunity_count[game] += 1
-                    elif profit > 0:
-                        hedging_opportunities.append(opportunity)
-
-    return positive_ev_bets, arbitrage_opportunities, hedging_opportunities, games
+    return positive_ev_bets, games, arbitrage_opportunities
 
 def format_bet_recommendation(bet):
     american_odds = decimal_to_american(bet['Odds'])
-    return (f"{bet['Sport']} - {bet['Game']} (Start: {bet['Start Time']})\n"
-            f"  Bet on: {bet['Team']} @ {bet['Bookmaker']}\n"
-            f"  Odds: {bet['Odds']:.2f} (Decimal) / {american_odds} (American)\n"
-            f"  Expected Value: {bet['EV']:.2%}\n"
-            f"  Estimated True Probability: {bet['Estimated True Probability']:.2%}\n")
-
-def format_arbitrage_opportunity(opp):
-    bet_strings = []
-    for bet, stake in opp['Bets']:
-        american_odds = decimal_to_american(bet['Odds'])
-        bet_strings.append(f"  Bet {len(bet_strings)+1}: {bet['Team']} @ {bet['Bookmaker']} - "
-                           f"Odds: {bet['Odds']:.2f} (Decimal) / {american_odds} (American), Stake: ${stake:.2f}")
+    base_string = (f"{bet['Sport']} - {bet['Game']} (Start: {bet['Start Time']})\n"
+                   f"  Bet Type: {bet['Bet Type']}\n"
+                   f"  Bookmaker: {bet['Bookmaker']}\n"
+                   f"  Odds: {bet['Odds']:.2f} (Decimal) / {american_odds} (American)\n"
+                   f"  Expected Value: {bet['EV']:.2%}\n")
     
-    return (f"{opp['Sport']} - {opp['Game']} (ARBITRAGE) (Start: {opp['Start Time']})\n" +
-            "\n".join(bet_strings) +
-            f"\n  Guaranteed Profit: ${opp['Profit']:.2f}\n")
+    if 'Team' in bet:
+        base_string += f"  Team/Outcome: {bet['Team']}\n"
+    if 'Spread' in bet:
+        base_string += f"  Spread: {bet['Spread']}\n"
+    if 'Total' in bet:
+        base_string += f"  Total: {bet['Total']}\n"
+    
+    return base_string
+
+def format_arbitrage_opportunity(opportunity):
+    base_string = (f"Market: {opportunity['Market']}\n"
+                   f"Date: {opportunity['Date']}\n"
+                   f"Profit: {opportunity['Profit']:.2f}%\n"
+                   f"Bets:\n")
+    
+    for bet in opportunity['Bets']:
+        american_odds = decimal_to_american(bet['Odds'])
+        base_string += (f"  - Type: {bet['Type']}\n"
+                        f"    Bookmaker: {bet['Bookmaker']}\n"
+                        f"    Odds: {bet['Odds']:.2f} (Decimal) / {american_odds} (American)\n")
+        if 'Total' in bet:
+            base_string += f"    Total: {bet['Total']}\n"
+    
+    return base_string
 
 def main(filename):
-    positive_ev_bets, arbitrage_opportunities, hedging_opportunities, games = analyze_odds(filename)
+    positive_ev_bets, games, arbitrage_opportunities = analyze_odds(filename)
     
     os.makedirs('logs', exist_ok=True)
     log_filename = f"logs/betting_recommendations_{datetime.now(EST).strftime('%Y%m%d_%H%M%S')}.txt"
@@ -176,7 +331,6 @@ def main(filename):
         
         log_file.write("Configuration:\n")
         log_file.write(f"Allowed Bookmakers: {', '.join(ALLOWED_BOOKMAKERS)}\n")
-        log_file.write(f"Minimum Arbitrage Profit: ${MINIMUM_ARBITRAGE_PROFIT}\n")
         log_file.write(f"Max Days Ahead: {MAX_DAYS_AHEAD}\n")
         log_file.write(f"Max Opportunities Per Game: {MAX_OPPORTUNITIES_PER_GAME}\n")
         log_file.write(f"EV Range: {MIN_EV_THRESHOLD:.2%} to {MAX_EV_THRESHOLD:.2%}\n\n")
@@ -185,36 +339,36 @@ def main(filename):
         for sport, sport_games in games.items():
             log_file.write(f"{sport}:\n")
             for game, data in sport_games.items():
-                log_file.write(f"  {game}: {len(data['home'])} home odds, {len(data['away'])} away odds\n")
+                log_file.write(f"  {game}:\n")
+                for market in ['moneyline', 'spread', 'total']:
+                    if market in data:
+                        log_file.write(f"    {market.capitalize()}: {len(data[market])} odds\n")
         log_file.write("\n")
 
         if positive_ev_bets:
-            log_file.write("High Value Single Bets:\n")
+            log_file.write("High Value Bets:\n")
             for bet in sorted(positive_ev_bets, key=lambda x: x['EV'], reverse=True)[:10]:  # Top 10 EV bets
                 log_file.write(format_bet_recommendation(bet))
-            log_file.write("\n")
-
-        if hedging_opportunities:
-            log_file.write("Hedging Opportunities:\n")
-            for opp in sorted(hedging_opportunities, key=lambda x: x['Profit'], reverse=True)[:5]:  # Top 5 hedging opportunities
-                log_file.write(format_arbitrage_opportunity(opp))
-            log_file.write("\n")
+                log_file.write("\n")
+        else:
+            log_file.write("No high value bets found.\n")
 
         if arbitrage_opportunities:
-            log_file.write(f"Arbitrage Opportunities (Guaranteed Profit >= ${MINIMUM_ARBITRAGE_PROFIT}, within next {MAX_DAYS_AHEAD} days):\n")
-            for opp in sorted(arbitrage_opportunities, key=lambda x: x['Profit'], reverse=True):
-                log_file.write(format_arbitrage_opportunity(opp))
-            log_file.write("\n")
+            log_file.write("\nArbitrage Opportunities:\n")
+            for opportunity in sorted(arbitrage_opportunities, key=lambda x: x['Profit'], reverse=True):
+                log_file.write(format_arbitrage_opportunity(opportunity))
+                log_file.write("\n")
+        else:
+            log_file.write("\nNo arbitrage opportunities found.\n")
 
         # Summary at the bottom
-        log_file.write("Betting Strategy Summary:\n")
-        log_file.write(f"- High Value Single Bets: {len(positive_ev_bets)}\n")
-        log_file.write(f"- Hedging Opportunities: {len(hedging_opportunities)}\n")
-        log_file.write(f"- Arbitrage Opportunities (Profit >= ${MINIMUM_ARBITRAGE_PROFIT}, within {MAX_DAYS_AHEAD} days): {len(arbitrage_opportunities)}\n")
+        log_file.write("\nBetting Strategy Summary:\n")
+        log_file.write(f"- High Value Bets: {len(positive_ev_bets)}\n")
+        log_file.write(f"- Arbitrage Opportunities: {len(arbitrage_opportunities)}\n")
 
     print(f"Betting recommendations have been saved to {log_filename}")
     
-    # Print the summary to the console at the bottom
+    # Print the summary to the console
     with open(log_filename, 'r') as log_file:
         content = log_file.read()
         print(content)
@@ -222,4 +376,8 @@ def main(filename):
     return log_filename
 
 if __name__ == "__main__":
-    main('path_to_your_csv_file.csv')
+    import sys
+    if len(sys.argv) != 2:
+        print("Usage: python script_name.py <path_to_csv_file>")
+        sys.exit(1)
+    main(sys.argv[1])
