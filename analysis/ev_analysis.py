@@ -58,16 +58,24 @@ def find_arbitrage_opportunities(bets, sport):
                     best_under = max(date_bets, key=lambda x: x['Under Odds'])
                     total_prob = (1 / best_over['Over Odds']) + (1 / best_under['Under Odds'])
                     if total_prob < 1:
-                        profit = (1 / total_prob - 1) * 100  # Profit percentage
-                        if profit >= MINIMUM_ARBITRAGE_PROFIT:
+                        over_stake = (1 / best_over['Over Odds']) / total_prob
+                        under_stake = (1 / best_under['Under Odds']) / total_prob
+                        min_stake = min(over_stake, under_stake)
+                        over_bet = 100 if over_stake == min_stake else 100 * (over_stake / min_stake)
+                        under_bet = 100 if under_stake == min_stake else 100 * (under_stake / min_stake)
+                        total_investment = over_bet + under_bet
+                        profit = (100 / total_prob) - total_investment
+                        profit_percentage = (profit / total_investment) * 100
+                        if profit > MINIMUM_ARBITRAGE_PROFIT:
                             opportunities.append({
                                 'Market': 'Total',
                                 'Date': date.strftime("%m/%d/%Y"),
                                 'Bets': [
-                                    {'Type': 'Over', 'Odds': best_over['Over Odds'], 'Bookmaker': best_over['Bookmaker'], 'Total': best_over['Total']},
-                                    {'Type': 'Under', 'Odds': best_under['Under Odds'], 'Bookmaker': best_under['Bookmaker'], 'Total': best_under['Total']}
+                                    {'Type': 'Over', 'Odds': best_over['Over Odds'], 'Bookmaker': best_over['Bookmaker'], 'Total': best_over['Total'], 'Stake': over_bet},
+                                    {'Type': 'Under', 'Odds': best_under['Under Odds'], 'Bookmaker': best_under['Bookmaker'], 'Total': best_under['Total'], 'Stake': under_bet}
                                 ],
-                                'Profit': profit
+                                'Profit': profit_percentage,
+                                'Total Investment': total_investment
                             })
                 else:
                     best_bets = {}
@@ -77,28 +85,40 @@ def find_arbitrage_opportunities(bets, sport):
                             best_bets[outcome] = bet
                     
                     # Check if we have odds for all possible outcomes
-                    if sport.lower() == 'soccer_epl' and market == 'moneyline':
-                        if len(best_bets) == 3:  # Home, Away, and Draw
-                            total_prob = sum(1 / bet['Odds'] for bet in best_bets.values())
-                            if total_prob < 1:
-                                profit = (1 / total_prob - 1) * 100  # Profit percentage
-                                if profit >= MINIMUM_ARBITRAGE_PROFIT:
-                                    opportunities.append({
-                                        'Market': market.capitalize(),
-                                        'Date': date.strftime("%m/%d/%Y"),
-                                        'Bets': [{'Type': bet['Team'], 'Odds': bet['Odds'], 'Bookmaker': bet['Bookmaker']} for bet in best_bets.values()],
-                                        'Profit': profit
-                                    })
-                    elif len(best_bets) == 2:  # For non-soccer sports or other markets
+                    if sport.lower() == 'soccer_epl' and market == 'moneyline' and len(best_bets) == 3:
                         total_prob = sum(1 / bet['Odds'] for bet in best_bets.values())
                         if total_prob < 1:
-                            profit = (1 / total_prob - 1) * 100  # Profit percentage
-                            if profit >= MINIMUM_ARBITRAGE_PROFIT:
+                            stakes = {team: (1 / bet['Odds']) / total_prob for team, bet in best_bets.items()}
+                            min_stake = min(stakes.values())
+                            normalized_stakes = {team: 100 if stake == min_stake else 100 * (stake / min_stake) for team, stake in stakes.items()}
+                            total_investment = sum(normalized_stakes.values())
+                            profit = (100 / total_prob) - total_investment
+                            profit_percentage = (profit / total_investment) * 100
+                            if profit > MINIMUM_ARBITRAGE_PROFIT:
                                 opportunities.append({
                                     'Market': market.capitalize(),
                                     'Date': date.strftime("%m/%d/%Y"),
-                                    'Bets': [{'Type': bet['Team'], 'Odds': bet['Odds'], 'Bookmaker': bet['Bookmaker']} for bet in best_bets.values()],
-                                    'Profit': profit
+                                    'Bets': [{'Type': team, 'Odds': bet['Odds'], 'Bookmaker': bet['Bookmaker'], 'Stake': normalized_stakes[team]} for team, bet in best_bets.items()],
+                                    'Profit': profit_percentage,
+                                    'Total Investment': total_investment
+                                })
+                    elif len(best_bets) == 2:  # For non-soccer sports or other markets
+                        total_prob = sum(1 / bet['Odds'] for bet in best_bets.values())
+                        if total_prob < 1:
+                            stakes = {team: (1 / bet['Odds']) / total_prob for team, bet in best_bets.items()}
+                            min_stake = min(stakes.values())
+                            normalized_stakes = {team: 100 if stake == min_stake else 100 * (stake / min_stake) for team, stake in stakes.items()}
+                            total_investment = sum(normalized_stakes.values())
+                            payout = min(normalized_stakes[team] * bet['Odds'] for team, bet in best_bets.items())
+                            profit = payout - total_investment
+                            profit_percentage = (profit / total_investment) * 100
+                            if profit > MINIMUM_ARBITRAGE_PROFIT:
+                                opportunities.append({
+                                    'Market': market.capitalize(),
+                                    'Date': date.strftime("%m/%d/%Y"),
+                                    'Bets': [{'Type': team, 'Odds': bet['Odds'], 'Bookmaker': bet['Bookmaker'], 'Stake': normalized_stakes[team]} for team, bet in best_bets.items()],
+                                    'Profit': profit_percentage,
+                                    'Total Investment': total_investment
                                 })
     return opportunities
 
@@ -301,6 +321,8 @@ def format_bet_recommendation(bet):
         base_string += f"  Spread: {bet['Spread']}\n"
     if 'Total' in bet:
         base_string += f"  Total: {bet['Total']}\n"
+    if 'Stake' in bet:
+        base_string += f"  Recommended Stake: {bet['Stake']:.2f}\n"
     
     return base_string
 
@@ -308,13 +330,15 @@ def format_arbitrage_opportunity(opportunity):
     base_string = (f"Market: {opportunity['Market']}\n"
                    f"Date: {opportunity['Date']}\n"
                    f"Profit: {opportunity['Profit']:.2f}%\n"
+                   f"Total Investment: {opportunity['Total Investment']:.2f}\n"
                    f"Bets:\n")
     
     for bet in opportunity['Bets']:
         american_odds = decimal_to_american(bet['Odds'])
         base_string += (f"  - Type: {bet['Type']}\n"
                         f"    Bookmaker: {bet['Bookmaker']}\n"
-                        f"    Odds: {bet['Odds']:.2f} (Decimal) / {american_odds} (American)\n")
+                        f"    Odds: {bet['Odds']:.2f} (Decimal) / {american_odds} (American)\n"
+                        f"    Stake: {bet['Stake']:.2f}\n")
         if 'Total' in bet:
             base_string += f"    Total: {bet['Total']}\n"
     
